@@ -1,70 +1,257 @@
-import { Image, StyleSheet, Platform } from 'react-native';
+import React, { useState, useEffect } from "react";
+import { View, Button, Image, StyleSheet, Alert } from "react-native";
+import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
+import { jsPDF } from "jspdf";
+import "jspdf-autotable";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
+import { encode as btoa } from "base-64";
+import { Buffer } from "buffer";
 
-import { HelloWave } from '@/components/HelloWave';
-import ParallaxScrollView from '@/components/ParallaxScrollView';
-import { ThemedText } from '@/components/ThemedText';
-import { ThemedView } from '@/components/ThemedView';
+const defaultFields = [
+  "Hct",
+  "RBCs",
+  "Pit",
+  "WBCs",
+  "Neutrophils",
+  "Segs",
+  "Bands",
+  "Lymphocytes",
+  "Monocytes",
+  "Eosinophils",
+  "Basophils",
+  "ESR",
+  "Fe",
+  "Fe Sat",
+  "FDP",
+  "Ferritin",
+  "Fibrinogen",
+  "Haptoglobin",
+  "Hgb",
+  "MCH",
+  "MCHC",
+  "MCV",
+  "PT",
+  "aPTT",
+  "Reticulocytes",
+  "TIBC",
+  "Transferrin",
+];
 
-export default function HomeScreen() {
+const HomeScreen: React.FC = () => {
+  const [imageUri, setImageUri] = useState<string | null>(null);
+  const [hasPermission, setHasPermission] = useState<boolean>(false);
+  const [pdfUri, setPdfUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const { status } =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+      setHasPermission(status === "granted");
+    })();
+  }, []);
+
+  const handleTakePhoto = async () => {
+    if (hasPermission) {
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        base64: true,
+      });
+
+      if (!result.canceled) {
+        const manipulatedImage = await ImageManipulator.manipulateAsync(
+          result.assets[0].uri,
+          [{ resize: { width: 800, height: 1000 } }],
+          {
+            compress: 0.7,
+            format: ImageManipulator.SaveFormat.JPEG,
+            base64: true,
+          }
+        );
+
+        setImageUri(manipulatedImage.uri);
+        const imageData = `data:image/jpeg;base64,${manipulatedImage.base64}`;
+        sendToOCRSpace(imageData);
+      }
+    } else {
+      console.log("Camera permission not granted");
+    }
+  };
+
+  const handleChoosePhoto = async () => {
+    if (hasPermission) {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        base64: true,
+      });
+
+      if (!result.canceled) {
+        const manipulatedImage = await ImageManipulator.manipulateAsync(
+          result.assets[0].uri,
+          [{ resize: { width: 1000, height: 1000 } }],
+          {
+            compress: 0.7,
+            format: ImageManipulator.SaveFormat.JPEG,
+            base64: true,
+          }
+        );
+
+        setImageUri(manipulatedImage.uri);
+        const imageData = `data:image/jpeg;base64,${manipulatedImage.base64}`;
+        sendToOCRSpace(imageData);
+      }
+    } else {
+      console.log("Media library permission not granted");
+    }
+  };
+
+  const sendToOCRSpace = async (imageData: string) => {
+    const apiKey = "";
+    const formData = new FormData();
+    formData.append("base64Image", imageData);
+    formData.append("language", "eng");
+    formData.append("isOverlayRequired", "false");
+    formData.append("isTable", "true");
+    formData.append("scale", "true");
+
+    try {
+      const response = await fetch("https://api.ocr.space/parse/image", {
+        method: "POST",
+        headers: {
+          apikey: apiKey,
+        },
+        body: formData,
+      });
+      const data = await response.json();
+      console.log("OCR Response: ", data);
+
+      if (data.OCRExitCode === 1) {
+        const parsedText = data.ParsedResults[0].ParsedText;
+        console.log("Parsed Text: ", parsedText);
+
+        const textLines = parsedText
+          .split("\n")
+          .map((line: string) => line.trim())
+          .filter((line: string) => line !== "");
+        console.log("Text Lines: ", textLines);
+
+        generatePDF(textLines);
+      } else {
+        console.error("OCR API Error: ", data.ErrorMessage);
+      }
+    } catch (error) {
+      console.error("Error:", error);
+    }
+  };
+
+  const processTextLines = (lines: string[]): { [key: string]: string } => {
+    const combinedText = lines.join(" ").replace(/\s+/g, " ").trim();
+    console.log("Combined Text: ", combinedText);
+
+    const parts = combinedText.split(/ (?=\d|[A-Za-z])/); // Split based on spaces before numbers or words
+
+    const result: { [key: string]: string } = {};
+    let fieldIndex = 0;
+
+    const fieldValues: string[] = [];
+    const defaultFieldCount = defaultFields.length;
+
+    parts.forEach((part, index) => {
+      if (isNaN(Number(part))) {
+        // Assume part is a field
+        if (fieldIndex < defaultFieldCount) {
+          fieldValues[fieldIndex] = part;
+        }
+      } else {
+        // Assume part is a value
+        if (fieldIndex < defaultFieldCount) {
+          result[defaultFields[fieldIndex]] = part;
+          fieldIndex++;
+        }
+      }
+    });
+
+    defaultFields.forEach((field) => {
+      if (result[field] === undefined) {
+        result[field] = "";
+      }
+    });
+
+    return result;
+  };
+
+  const generatePDF = async (textLines: string[]) => {
+    const doc = new jsPDF();
+
+    const fieldsValues = processTextLines(textLines);
+    const tableData = defaultFields.map((defaultField) => ({
+      field: defaultField,
+      value: fieldsValues[defaultField] || "",
+    }));
+
+    console.log("Table Data: ", tableData);
+
+    doc.text("Hematology", 10, 10);
+    doc.autoTable({
+      head: [["Field", "Result"]],
+      body: tableData.map((row) => [row.field, row.value]),
+      startY: 20,
+    });
+
+    const pdfOutput = doc.output("arraybuffer");
+
+    // Menggunakan Buffer untuk mengubah array buffer menjadi string base64
+    const buffer = Buffer.from(pdfOutput);
+    const base64Data = buffer.toString("base64");
+
+    const fileUri = `${FileSystem.documentDirectory}output.pdf`;
+
+    try {
+      await FileSystem.writeAsStringAsync(fileUri, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      setPdfUri(fileUri);
+      console.log("PDF saved to:", fileUri);
+    } catch (error) {
+      console.error("Error saving PDF:", error);
+    }
+  };
+
+  const handleOpenPdf = async () => {
+    if (pdfUri) {
+      const supported = await Sharing.isAvailableAsync();
+      if (supported) {
+        await Sharing.shareAsync(pdfUri);
+      } else {
+        Alert.alert("Sharing not supported on this device");
+      }
+    } else {
+      Alert.alert("No PDF available");
+    }
+  };
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({ ios: 'cmd + d', android: 'cmd + m' })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-        <ThemedText>
-          Tap the Explore tab to learn more about what's included in this starter app.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          When you're ready, run{' '}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+    <View style={styles.container}>
+      <Button title="Take Photo" onPress={handleTakePhoto} />
+      <Button title="Choose Photo" onPress={handleChoosePhoto} />
+      {imageUri && <Image source={{ uri: imageUri }} style={styles.image} />}
+      {pdfUri && <Button title="Open PDF" onPress={handleOpenPdf} />}
+    </View>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  container: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
-  },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  image: {
+    width: 200,
+    height: 200,
+    marginTop: 20,
   },
 });
+
+export default HomeScreen;
